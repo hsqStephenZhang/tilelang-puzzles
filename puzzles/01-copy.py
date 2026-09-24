@@ -149,6 +149,15 @@ each block accordingly.
 """
 
 
+"""
+With vectorized memory access (4 x fp16 per thread), this kernel reaches the same
+bandwidth as torch.clone() (which is a cudaMemcpyAsync D2D, not a kernel):
+~167 GB/s on a GTX 1650 SUPER, about 87% of the 192 GB/s theoretical peak.
+Measured device time is identical within run-to-run jitter (~1-2%); grid shape and
+thread count (128..1024 threads, 16K..131K blocks) make no measurable difference.
+The only slow configuration is BLOCK_N == threads with coalesced_width > 1,
+since then only 1/coalesced_width of the threads have work.
+"""
 @tilelang.jit
 def tl_copy_1d_parallel(A, BLOCK_N: int):
     # The host/declaration part of TileLang script.
