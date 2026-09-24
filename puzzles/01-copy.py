@@ -105,6 +105,11 @@ def tl_copy_1d_multi_threads(A):
     B = T.empty((N,), T.float16)
 
     # TODO: Implement this function
+    BLOCK_N = 256
+    with T.Kernel(T.ceildiv(N, BLOCK_N), threads=256) as bx:
+        start = bx * BLOCK_N
+        end = start + BLOCK_N
+        T.copy(A[start:end], B[start:end])
 
     return B
 
@@ -152,6 +157,11 @@ def tl_copy_1d_parallel(A, BLOCK_N: int):
     B = T.empty((N,), T.float16)
 
     # TODO: Implement this function
+    with T.Kernel(T.ceildiv(N, BLOCK_N), threads=256) as bx:
+        start = bx * BLOCK_N
+        end = start + BLOCK_N
+        # here the `coalesced_width` is crucial for performance
+        T.copy(A[start:end], B[start:end], coalesced_width=4)
 
     return B
 
