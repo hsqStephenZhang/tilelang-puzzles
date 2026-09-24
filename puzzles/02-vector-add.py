@@ -105,7 +105,12 @@ def tl_mul_relu_1d(A, B, BLOCK_N: int):
     B: T.Tensor((N,), T.float16)
     C = T.empty((N,), T.float16)
 
-    # TODO: Implement this function
+    with T.Kernel(T.ceildiv(N, BLOCK_N), threads=256) as bx:
+        baseIdx = bx * BLOCK_N
+        for i in T.Parallel(BLOCK_N):
+            idx = baseIdx + i
+            if idx < N:
+                C[idx] = T.max(0, A[idx] * B[idx])
 
     return C
 
@@ -168,7 +173,29 @@ def tl_mul_relu_1d_mem(A, B, BLOCK_N: int):
     B: T.Tensor((N,), dtype)
     C = T.empty((N,), dtype)
 
-    # TODO: Implement this function
+    # 只有**访问**和**布局**兼容的时候才会 tilelang 编译
+    # 布局兼容：
+    #   fragment 做了一层映射: 逻辑下标 i -> (线程 t，线程寄存器的第几个槽位 c)
+    #   默认将 fragment 切分为 k = BLOCK_N / threads 份，因此每一个线程拿 [t*k, (t+1)*k]
+    #   因此简单理解，要求 BLOCK_N % (threads * coalesced_width) == 0
+    #   例如 (BLOCK_N, threads, coalesced_width) = (1024, 256, 4) 是最理想的情况了
+    # 访问兼容：
+    #   T.Parallel 中，每一个线程会访问自己对应的 fragment
+    #   因此，也要求 body 访问的元素所在的线程 == 执行迭代 i 的线程
+    with T.Kernel(T.ceildiv(N, BLOCK_N), threads=256) as bx:
+        A_reg = T.alloc_fragment((BLOCK_N,), T.float32)
+        B_reg = T.alloc_fragment((BLOCK_N,), T.float32)
+        C_reg = T.alloc_fragment((BLOCK_N,), T.float32)
+
+        baseIdx = BLOCK_N * bx
+
+        T.copy(A[baseIdx : baseIdx + BLOCK_N], A_reg, coalesced_width=4)
+        T.copy(B[baseIdx : baseIdx + BLOCK_N], B_reg, coalesced_width=4)
+
+        for i in T.Parallel(BLOCK_N):
+            C_reg[i] = T.max(0, A_reg[i] * B_reg[i])
+
+        T.copy(C_reg, C[baseIdx : baseIdx + BLOCK_N], coalesced_width=4)
 
     return C
 
