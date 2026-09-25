@@ -64,6 +64,17 @@ def tl_reduce_sum(A, BLOCK_N: int, BLOCK_M: int):
     B = T.empty((N,), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(N, threads=256) as row:
+        row_sum = T.alloc_fragment((1,), dtype)
+        acc = T.alloc_fragment((1, BLOCK_M), dtype)
+        T.clear(acc)
+        for k in T.serial(T.ceildiv(M, BLOCK_M)):
+            for j in T.Parallel(BLOCK_M):
+                col = k * BLOCK_M + j
+                acc[0, j] += T.if_then_else(col < M, A[row, col], 0)
+        # 所有 chunk 都累加完成后 reduce 一次
+        T.reduce_sum(acc, row_sum, dim=1, clear=True)
+        B[row] = row_sum[0]
 
     return B
 
