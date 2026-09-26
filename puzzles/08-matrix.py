@@ -63,7 +63,7 @@ def tl_gemv(A, B, BLOCK_M: int, BLOCK_K: int):
     C = T.empty((M,), dtype)
 
     # TODO: Implement this function
-    
+
     return C
 
 
@@ -218,6 +218,36 @@ def tl_matmul_opt(A, B, BLOCK_M: int, BLOCK_N: int, BLOCK_K: int):
     C = T.empty((M, N), dtype)
 
     # TODO: Implement this function
+    # 根据 BLOCK_N BLOCK_M 将 A B 划分为小的矩阵行/列，此为内积
+    with T.Kernel(T.ceildiv(N, BLOCK_N), T.ceildiv(M, BLOCK_M), threads=256) as (bx, by):
+        A_shared = T.alloc_shared((BLOCK_M, BLOCK_K), dtype)
+        B_shared = T.alloc_shared((BLOCK_K, BLOCK_N), dtype)
+        C_local = T.alloc_fragment((BLOCK_M, BLOCK_N), accum_dtype)
+        T.clear(C_local)
+
+        baseRow = by * BLOCK_M
+        baseCol = bx * BLOCK_N
+        for reductionIdx in T.serial(T.ceildiv(K, BLOCK_K)):
+            baseReduction = reductionIdx * BLOCK_K
+            T.copy(
+                A[baseRow : baseRow + BLOCK_M, baseReduction : baseReduction + BLOCK_K], A_shared
+            )
+            T.copy(
+                B[
+                    baseReduction : baseReduction + BLOCK_K,
+                    baseCol : baseCol + BLOCK_N,
+                ],
+                B_shared,
+            )
+
+            # 实现小矩阵乘法
+            # 如果使用普通的算法，则大概率是外积，否则会编译为 tensor core 对应的指令
+            T.gemm(A_shared, B_shared, C_local)
+            # for i in T.Parallel(BLOCK_N):
+            #     for j in T.Parallel(BLOCK_M):
+            #         for k in T.Parallel(BLOCK_K):
+            #             C_local[i, j] += A_shared[i, k] * B_shared[k, j]
+        T.copy(C_local, C[baseRow : baseRow + BLOCK_M, baseCol : baseCol + BLOCK_N])
 
     return C
 
@@ -240,19 +270,20 @@ def run_matmul_opt():
         "BLOCK_K": BLOCK_K,
     }
 
-    print("Naive Matmul Implementation: ")
-    naive_matmul_kernel = tl_matmul_naive.compile(**args_dict)
-    naive_matmul_kernel.print_source_code()
+    # print("Naive Matmul Implementation: ")
+    # naive_matmul_kernel = tl_matmul_naive.compile(**args_dict)
+    # naive_matmul_kernel.print_source_code()
 
     print("OPT Matmul Implementation: ")
     opt_matmul_kernel = tl_matmul_opt.compile(**args_dict)
     opt_matmul_kernel.print_source_code()
 
-    bench_puzzle(tl_matmul_naive, ref_matmul, args_dict, bench_torch=True)
+    # bench_puzzle(tl_matmul_naive, ref_matmul, args_dict, bench_torch=True)
+    test_puzzle(tl_matmul_opt, ref_matmul, args_dict)
     bench_puzzle(tl_matmul_opt, ref_matmul, args_dict, bench_torch=True)
 
 
 if __name__ == "__main__":
-    run_gemv()
-    run_matmul_naive()
+    # run_gemv()
+    # run_matmul_naive()
     run_matmul_opt()
