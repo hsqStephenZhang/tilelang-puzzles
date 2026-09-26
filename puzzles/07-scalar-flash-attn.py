@@ -81,7 +81,50 @@ def tl_scalar_flash_attn(Q, K, V, BLOCK_B: int, BLOCK_S: int):
     V: T.Tensor((B, S), dtype)
     O = T.empty((B, S), dtype)
 
-    # TODO: Implement this function
+    with T.Kernel(B, threads=256) as row:
+        # 逻辑上，所有 threads 共享一个 BLOCK_S 的寄存器空间
+        # 因为对 S 这个维度来说，我们都是先处理 (1, BLOCK_S) 个的局部元素，然后做全局的合并
+        x = T.alloc_fragment((1, BLOCK_S), dtype)
+        row_max = T.alloc_fragment((1,), dtype)
+        row_sum = T.alloc_fragment((1,), dtype)
+
+        T.fill(row_max, -T.infinity(dtype))
+        T.clear(row_sum)
+
+        for k in T.serial(T.ceildiv(S, BLOCK_S)):
+            for j in T.Parallel(BLOCK_S):
+                col = k * BLOCK_S + j
+                x[0, j] = T.if_then_else(col < S, Q[row, col] * K[row, col], -T.infinity(dtype))
+
+            # 保存上一个 [(k-1) * BLOCK_S, k * BLOCK_S) 的最大值
+            row_max_old = row_max[0]
+            # 计算新的最大值 [k * BLOCK_S, (k + 1) * BLOCK_S)
+            T.reduce_max(x, row_max, dim=1, clear=False)
+
+            # 修正并保存到 row_sum 中
+            row_sum_old_fixed = row_sum[0] * T.exp2((row_max_old - row_max[0]) * log2_e)
+
+            # 计算新的 BLOCK_S 的和
+            for j in T.Parallel(BLOCK_S):
+                x[0, j] = T.exp2((x[0, j] - row_max[0]) * log2_e)
+
+            T.reduce_sum(
+                x, row_sum, dim=1, clear=True
+            )  # clear 必须要设置为 True，清除上一轮计算的结果
+
+            # 两者加到一起
+            row_sum[0] = row_sum_old_fixed + row_sum[0]
+
+        # 我们已经得到了 MAX 和 SUM，重新计算 P[i, j]  = exp(Q[i, j] * K [i, j] - MAX)
+        for k in T.serial(T.ceildiv(S, BLOCK_S)):
+            for j in T.Parallel(BLOCK_S):
+                col = k * BLOCK_S + j
+                if col < S:
+                    O[row, col] = (
+                        V[row, col]
+                        * T.exp2((Q[row, col] * K[row, col] - row_max[0]) * log2_e)
+                        / row_sum[0]
+                    )
 
     return O
 
