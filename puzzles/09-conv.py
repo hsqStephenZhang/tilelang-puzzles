@@ -81,6 +81,17 @@ def ref_conv1d(X: torch.Tensor, K: torch.Tensor):
     ).view(N, L)
 
 
+"""
+for i in range(N):
+    for j in range(L):
+        ACC = 0
+        for k in range(KL):
+            if j + k < L:  # boundary check
+                ACC += X[i, j + k] * K[k]
+        O[i, j] = ACC
+"""
+
+
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
@@ -96,6 +107,17 @@ def tl_conv1d_naive(X, K, BLOCK_N: int, BLOCK_L: int):
     O = T.empty((N, L), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(T.ceildiv(N, BLOCK_N), T.ceildiv(L, BLOCK_L), threads=256) as (bn, bl):
+        Acc = T.alloc_fragment((BLOCK_N, BLOCK_L), accum_dtype)
+        T.clear(Acc)
+
+        for i, j in T.Parallel(BLOCK_N, BLOCK_L):
+            row = bn * BLOCK_N + i
+            col = bl * BLOCK_L + j
+            for k in T.Serial(KL):
+                if col + k < L:
+                    Acc[i, j] += X[row, col + k] * K[k]
+        T.copy(Acc, O[bn * BLOCK_N : (bn + 1) * BLOCK_N, bl * BLOCK_L : (bl + 1) * BLOCK_L])
 
     return O
 
@@ -202,12 +224,43 @@ def tl_conv1d_multi_outchannel(X, K, BLOCK_N: int, BLOCK_L: int):
     O = T.empty((N, L, F), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(T.ceildiv(N, BLOCK_N), T.ceildiv(L, BLOCK_L), threads=256) as (bn, bl):
+        Acc = T.alloc_fragment((BLOCK_N, BLOCK_L, F), accum_dtype)
+        T.clear(Acc)
+
+        for i, j, f in T.Parallel(BLOCK_N, BLOCK_L, F):
+            row = bn * BLOCK_N + i
+            col = bl * BLOCK_L + j
+            for k in T.Serial(KL):
+                if col + k < L:
+                    Acc[i, j, f] += X[row, col + k] * K[k, f]
+        T.copy(Acc, O[bn * BLOCK_N : (bn + 1) * BLOCK_N, bl * BLOCK_L : (bl + 1) * BLOCK_L, 0:F])
 
     return O
 
 
 """
 Then let's try im2col and use T.gemm to speedup the computation.
+"""
+
+
+"""
+im2col: unfold every sliding window of X into one row of a matrix, so the convolution
+becomes a single GEMM.
+
+    # Xcol[i, j, k] is the window of length KL that starts at X[i, j] (zero-padded past L)
+    for i in range(N):
+        for j in range(L):
+            for k in range(KL):
+                Xcol[i, j, k] = X[i, j + k] if j + k < L else 0
+
+    # flatten (i, j) into one "row" axis of size N * L:
+    #   Xcol: [N * L, KL],  K: [KL, F]  ->  O: [N * L, F]
+    O = Xcol @ K
+
+Per block (BLOCK_N rows of X, BLOCK_L output positions), this is a small GEMM:
+    [BLOCK_N * BLOCK_L, KL] @ [KL, F] -> [BLOCK_N * BLOCK_L, F]
+which `T.gemm` maps onto Tensor Cores, unlike the scalar FMA loop in the naive version.
 """
 
 
@@ -225,7 +278,23 @@ def tl_conv1d_im2col(X, K, BLOCK_N: int, BLOCK_L: int):
     K: T.Tensor((KL, F), dtype)
     O = T.empty((N, L, F), dtype)
 
-    # TODO: Implement this function
+    with T.Kernel(T.ceildiv(N, BLOCK_N), T.ceildiv(L, BLOCK_L), threads=256) as (bn, bl):
+        X_shared = T.alloc_shared((BLOCK_N * BLOCK_L, KL), dtype)
+        K_shared = T.alloc_shared((KL, F), dtype)
+        O_local = T.alloc_fragment((BLOCK_N * BLOCK_L, F), accum_dtype)
+
+        T.copy(K, K_shared)
+
+        for i, j, k in T.Parallel(BLOCK_N, BLOCK_L, KL):
+            X_shared[i * BLOCK_L + j, k] = T.if_then_else(
+                bl * BLOCK_L + j + k < L, X[bn * BLOCK_N + i, bl * BLOCK_L + j + k], 0
+            )
+
+        T.gemm(X_shared, K_shared, O_local, clear_accum=True)
+        O_reshaped = T.reshape(O_local, (BLOCK_N, BLOCK_L, F))
+        T.copy(
+            O_reshaped, O[bn * BLOCK_N : (bn + 1) * BLOCK_N, bl * BLOCK_L : (bl + 1) * BLOCK_L, :]
+        )
 
     return O
 
@@ -265,5 +334,5 @@ def run_conv1d_im2col():
 
 
 if __name__ == "__main__":
-    run_conv1d_naive()
+    # run_conv1d_naive()
     run_conv1d_im2col()
