@@ -1,0 +1,191 @@
+r"""
+LeetGPU 35: Monte Carlo Integration
+===================================
+
+Category: ["leetgpu"]
+Difficulty: ["medium"]
+
+Implement Monte Carlo integration on a GPU. Given a set of function values \(y_i = f(x_i)\) sampled at random points \(x_i\) uniformly distributed in the interval \([a, b]\), estimate the definite integral:
+\[ \int_a^b f(x) \, dx \approx (b - a) \cdot \frac{1}{n} \sum_{i=1}^{n} y_i \]
+
+The Monte Carlo method approximates the integral by computing the average of the function values and multiplying by the interval width.
+
+Implementation Requirements
+---------------------------
+
+- External libraries are not permitted
+- The `solve` function signature must remain unchanged
+- The final result must be stored in the `result` variable
+- Solutions are tested with absolute tolerance of 1e-2 and relative tolerance of 1e-2
+
+Example:
+--------
+
+Input:  a = 0, b = 2, n_samples = 8
+y_samples = [0.0625, 0.25, 0.5625, 1.0, 1.5625, 2.25, 3.0625, 4.0]
+Output: result = 3.1875
+
+Constraints
+-----------
+
+- 1 ≤ `n_samples` ≤ 100,000,000
+- -1000.0 ≤ `a` < `b` ≤ 1000.0
+- -10000.0 ≤ function values ≤ 10000.0
+- The tolerance is set to 1e-2 to account for the inherent randomness in Monte Carlo methods and floating-point precision variations.
+- Performance is measured with `n_samples` = 10,000,000
+
+Run `python3 puzzles/leetgpu/35_monte_carlo_integration.py` to test your `solve`, or add `--ref` to run the
+reference implementation through the same harness.
+"""
+
+import ctypes
+from typing import Any, Dict, List
+
+import tilelang  # noqa: F401
+import tilelang.language as T  # noqa: F401
+import torch
+from common.leetgpu import ChallengeBase, run_challenge
+
+
+class Challenge(ChallengeBase):
+    name = "Monte Carlo Integration"
+    atol = 0.01
+    rtol = 0.01
+    num_gpus = 1
+    access_tier = "free"
+
+    def reference_impl(
+        self, y_samples: torch.Tensor, result: torch.Tensor, a: float, b: float, n_samples: int
+    ):
+        assert y_samples.shape == (n_samples,)
+        assert result.shape == (1,)
+        assert y_samples.dtype == result.dtype
+        assert y_samples.device == result.device
+        assert b > a
+
+        # Monte Carlo integration: integral ≈ (b - a) * mean(y_samples)
+        mean_y = torch.mean(y_samples)
+        integral = (b - a) * mean_y
+
+        result[0] = integral
+
+    def get_solve_signature(self) -> Dict[str, tuple]:
+        return {
+            "y_samples": (ctypes.POINTER(ctypes.c_float), "in"),
+            "result": (ctypes.POINTER(ctypes.c_float), "out"),
+            "a": (ctypes.c_float, "in"),
+            "b": (ctypes.c_float, "in"),
+            "n_samples": (ctypes.c_int, "in"),
+        }
+
+    def generate_example_test(self) -> Dict[str, Any]:
+        dtype = torch.float32
+        y_samples = torch.tensor(
+            [0.0625, 0.25, 0.5625, 1.0, 1.5625, 2.25, 3.0625, 4.0], device=self.device, dtype=dtype
+        )
+        result = torch.zeros(1, device=self.device, dtype=dtype)
+        return {
+            "y_samples": y_samples,
+            "result": result,
+            "a": 0.0,
+            "b": 2.0,
+            "n_samples": 8,
+        }
+
+    def generate_functional_test(self) -> List[Dict[str, Any]]:
+        dtype = torch.float32
+        test_specs = [
+            # Basic test cases
+            ("basic_8", [0.0625, 0.25, 0.5625, 1.0, 1.5625, 2.25, 3.0625, 4.0], 0.0, 2.0),
+            ("constant_function", [1.0, 1.0, 1.0, 1.0], 0.0, 4.0),
+            ("linear_function", [0.0, 1.0, 2.0, 3.0], 0.0, 3.0),
+            ("negative_interval", [-1.0, -2.0, -3.0], -2.0, 1.0),
+            ("small_interval", [0.5, 1.5], 1.0, 2.0),
+        ]
+
+        test_cases = []
+        for _, y_vals, a, b in test_specs:
+            n_samples = len(y_vals)
+            test_cases.append(
+                {
+                    "y_samples": torch.tensor(y_vals, device=self.device, dtype=dtype),
+                    "result": torch.zeros(1, device=self.device, dtype=dtype),
+                    "a": a,
+                    "b": b,
+                    "n_samples": n_samples,
+                }
+            )
+
+        # Random test cases with different sizes
+        for _, n_samples, a, b in [
+            ("small_samples", 10, 0.0, 1.0),
+            ("medium_samples", 100, -1.0, 1.0),
+            ("large_samples", 1000, 0.0, 10.0),
+            ("many_samples", 10000, -5.0, 5.0),
+        ]:
+            test_cases.append(
+                {
+                    "y_samples": torch.empty(n_samples, device=self.device, dtype=dtype).uniform_(
+                        -10.0, 10.0
+                    ),
+                    "result": torch.zeros(1, device=self.device, dtype=dtype),
+                    "a": a,
+                    "b": b,
+                    "n_samples": n_samples,
+                }
+            )
+
+        # Edge cases
+        for _, n_samples, a, b in [
+            ("min_samples", 1, 0.0, 1.0),
+            ("large_interval", 100, -100.0, 100.0),
+            ("small_interval_edge", 50, 0.0, 0.1),
+        ]:
+            test_cases.append(
+                {
+                    "y_samples": torch.empty(n_samples, device=self.device, dtype=dtype).uniform_(
+                        -1.0, 1.0
+                    ),
+                    "result": torch.zeros(1, device=self.device, dtype=dtype),
+                    "a": a,
+                    "b": b,
+                    "n_samples": n_samples,
+                }
+            )
+
+        return test_cases
+
+    def generate_performance_test(self) -> Dict[str, Any]:
+        dtype = torch.float32
+        n_samples = 10000000
+        return {
+            "y_samples": torch.empty(n_samples, device=self.device, dtype=dtype).uniform_(
+                -1000.0, 1000.0
+            ),
+            "result": torch.zeros(1, device=self.device, dtype=dtype),
+            "a": -10.0,
+            "b": 10.0,
+            "n_samples": n_samples,
+        }
+
+
+# TODO: Implement your TileLang kernel(s) here, e.g.
+#
+# @tilelang.jit
+# def tl_monte_carlo_integration(...):
+#     ...
+
+
+def solve(
+    y_samples: torch.Tensor,
+    result: torch.Tensor,
+    a: float,
+    b: float,
+    n_samples: int,
+):
+    # TODO: launch your TileLang kernel and write the result into `result` in place.
+    pass
+
+
+if __name__ == "__main__":
+    run_challenge(Challenge(), solve)

@@ -1,0 +1,497 @@
+r"""
+LeetGPU 42: 2D Max Pooling
+==========================
+
+Category: ["leetgpu"]
+Difficulty: ["medium"]
+
+Implement a 2D max pooling operation for image/feature map downsampling.
+The program should take an input tensor and produce an output tensor by applying max pooling with specified kernel size, stride, and padding.
+
+(diagram omitted, see challenge.html in leetgpu-challenges)
+
+Implementation Requirements
+---------------------------
+
+- External libraries are not permitted
+- The `solve` function signature must remain unchanged
+- The final result must be stored in tensor `output`
+
+Max Pooling Operation
+---------------------
+
+For each output position (n, c, h_out, w_out), compute the maximum value over the corresponding input window:
+
+`output[n, c, h_out, w_out] = max(input[n, c, h:h+kernel_size, w:w+kernel_size])`
+
+where h = h_out * stride and w = w_out * stride
+
+Example 1:
+----------
+
+Input:  input = [[[[1.0, 2.0, 3.0],
+[4.0, 5.0, 6.0],
+[7.0, 8.0, 9.0]]]]
+kernel_size = 2
+stride = 1
+padding = 0
+Output: output = [[[[5.0, 6.0],
+[8.0, 9.0]]]]
+
+Example 2:
+----------
+
+Input:  input = [[[[1.0, 2.0, 3.0, 4.0, 5.0],
+[6.0, 7.0, 8.0, 9.0, 10.0],
+[11.0, 12.0, 13.0, 14.0, 15.0],
+[16.0, 17.0, 18.0, 19.0, 20.0],
+[21.0, 22.0, 23.0, 24.0, 25.0]]]]
+kernel_size = 3
+stride = 1
+padding = 1
+Output: output = [[[[7.0, 8.0, 9.0, 10.0, 10.0],
+[12.0, 13.0, 14.0, 15.0, 15.0],
+[17.0, 18.0, 19.0, 20.0, 20.0],
+[22.0, 23.0, 24.0, 25.0, 25.0],
+[22.0, 23.0, 24.0, 25.0, 25.0]]]]
+
+Constraints
+-----------
+
+- 1 ≤ N ≤ 100 (batch size)
+- 1 ≤ C ≤ 512 (channels)
+- 1 ≤ H, W ≤ 1024 (height, width)
+- 1 ≤ kernel_size ≤ 16
+- 1 ≤ stride ≤ 16
+- 0 ≤ padding ≤ 16
+- Input and output tensors use float32 precision
+- Performance is measured with `N` = 4, `kernel_size` = 3, `stride` = 2
+
+Run `python3 puzzles/leetgpu/42_2d_max_pooling.py` to test your `solve`, or add `--ref` to run the
+reference implementation through the same harness.
+"""
+
+import ctypes
+from typing import Any, Dict, List
+
+import tilelang  # noqa: F401
+import tilelang.language as T  # noqa: F401
+import torch
+from common.leetgpu import ChallengeBase, run_challenge
+
+
+class Challenge(ChallengeBase):
+    name = "2D Max Pooling"
+    atol = 1e-05
+    rtol = 1e-05
+    num_gpus = 1
+    access_tier = "free"
+
+    def reference_impl(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        N: int,
+        C: int,
+        H: int,
+        W: int,
+        kernel_size: int,
+        stride: int,
+        padding: int,
+    ):
+        input_tensor = input.view(N, C, H, W)
+
+        # Apply max pooling
+        result = torch.nn.functional.max_pool2d(
+            input_tensor, kernel_size=kernel_size, stride=stride, padding=padding
+        )
+
+        output.copy_(result.flatten())
+
+    def get_solve_signature(self) -> Dict[str, tuple]:
+        return {
+            "input": (ctypes.POINTER(ctypes.c_float), "in"),
+            "output": (ctypes.POINTER(ctypes.c_float), "out"),
+            "N": (ctypes.c_int, "in"),
+            "C": (ctypes.c_int, "in"),
+            "H": (ctypes.c_int, "in"),
+            "W": (ctypes.c_int, "in"),
+            "kernel_size": (ctypes.c_int, "in"),
+            "stride": (ctypes.c_int, "in"),
+            "padding": (ctypes.c_int, "in"),
+        }
+
+    def generate_example_test(self) -> Dict[str, Any]:
+        """Simple test case matching the example in challenge.html"""
+        dtype = torch.float32
+        N, C, H, W = 1, 1, 3, 3
+        kernel_size, stride, padding = 2, 1, 0
+
+        # Create input tensor: [[[[1, 2, 3], [4, 5, 6], [7, 8, 9]]]]
+        input_tensor = torch.tensor(
+            [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]], device=self.device, dtype=dtype
+        )
+
+        # Calculate output dimensions
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        return {
+            "input": input_tensor.flatten(),
+            "output": output_tensor,
+            "N": N,
+            "C": C,
+            "H": H,
+            "W": W,
+            "kernel_size": kernel_size,
+            "stride": stride,
+            "padding": padding,
+        }
+
+    def generate_functional_test(self) -> List[Dict[str, Any]]:
+        """Comprehensive test suite covering various scenarios and edge cases"""
+        dtype = torch.float32
+        test_cases = []
+
+        # Set seed for reproducible random tests
+        torch.manual_seed(42)
+
+        # Test case 1: 2x2 kernel, stride 2, no padding (deterministic)
+        N, C, H, W = 1, 1, 4, 4
+        kernel_size, stride, padding = 2, 2, 0
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        input_tensor = torch.tensor(
+            [
+                [
+                    [
+                        [1.0, 2.0, 3.0, 4.0],
+                        [5.0, 6.0, 7.0, 8.0],
+                        [9.0, 10.0, 11.0, 12.0],
+                        [13.0, 14.0, 15.0, 16.0],
+                    ]
+                ]
+            ],
+            device=self.device,
+            dtype=dtype,
+        )
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        test_cases.append(
+            {
+                "input": input_tensor.flatten(),
+                "output": output_tensor,
+                "N": N,
+                "C": C,
+                "H": H,
+                "W": W,
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+            }
+        )
+
+        # Test case 2: 3x3 kernel, stride 1, padding 1 (random data)
+        N, C, H, W = 1, 2, 5, 5
+        kernel_size, stride, padding = 3, 1, 1
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        input_tensor = torch.randn(N, C, H, W, device=self.device, dtype=dtype)
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        test_cases.append(
+            {
+                "input": input_tensor.flatten(),
+                "output": output_tensor,
+                "N": N,
+                "C": C,
+                "H": H,
+                "W": W,
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+            }
+        )
+
+        # Test case 3: 1x1 kernel, stride 1, no padding (identity operation)
+        N, C, H, W = 2, 3, 8, 8
+        kernel_size, stride, padding = 1, 1, 0
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        input_tensor = torch.randn(N, C, H, W, device=self.device, dtype=dtype)
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        test_cases.append(
+            {
+                "input": input_tensor.flatten(),
+                "output": output_tensor,
+                "N": N,
+                "C": C,
+                "H": H,
+                "W": W,
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+            }
+        )
+
+        # Test case 4: Large kernel with padding
+        N, C, H, W = 1, 1, 10, 10
+        kernel_size, stride, padding = 5, 2, 2
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        input_tensor = torch.randn(N, C, H, W, device=self.device, dtype=dtype)
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        test_cases.append(
+            {
+                "input": input_tensor.flatten(),
+                "output": output_tensor,
+                "N": N,
+                "C": C,
+                "H": H,
+                "W": W,
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+            }
+        )
+
+        # Test case 5: Edge case with small dimensions
+        N, C, H, W = 1, 1, 2, 2
+        kernel_size, stride, padding = 2, 1, 0
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        input_tensor = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]], device=self.device, dtype=dtype)
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        test_cases.append(
+            {
+                "input": input_tensor.flatten(),
+                "output": output_tensor,
+                "N": N,
+                "C": C,
+                "H": H,
+                "W": W,
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+            }
+        )
+
+        # Test case 6: Boundary conditions - kernel size equals input size
+        N, C, H, W = 1, 1, 3, 3
+        kernel_size, stride, padding = 3, 1, 0
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        input_tensor = torch.tensor(
+            [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]], device=self.device, dtype=dtype
+        )
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        test_cases.append(
+            {
+                "input": input_tensor.flatten(),
+                "output": output_tensor,
+                "N": N,
+                "C": C,
+                "H": H,
+                "W": W,
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+            }
+        )
+
+        # Test case 7: Large padding relative to input size
+        N, C, H, W = 1, 1, 4, 4
+        kernel_size, stride, padding = 2, 1, 1
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        input_tensor = torch.tensor(
+            [
+                [
+                    [
+                        [1.0, 2.0, 3.0, 4.0],
+                        [5.0, 6.0, 7.0, 8.0],
+                        [9.0, 10.0, 11.0, 12.0],
+                        [13.0, 14.0, 15.0, 16.0],
+                    ]
+                ]
+            ],
+            device=self.device,
+            dtype=dtype,
+        )
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        test_cases.append(
+            {
+                "input": input_tensor.flatten(),
+                "output": output_tensor,
+                "N": N,
+                "C": C,
+                "H": H,
+                "W": W,
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+            }
+        )
+
+        # Test case 8: Multiple channels with different patterns
+        N, C, H, W = 1, 3, 6, 6
+        kernel_size, stride, padding = 2, 2, 1
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        # Create structured input with different patterns per channel
+        input_tensor = torch.zeros(N, C, H, W, device=self.device, dtype=dtype)
+        input_tensor[0, 0, :, :] = torch.arange(H * W, device=self.device, dtype=dtype).reshape(
+            H, W
+        )
+        input_tensor[0, 1, :, :] = (
+            torch.arange(H * W, device=self.device, dtype=dtype).reshape(H, W).flip(0)
+        )
+        input_tensor[0, 2, :, :] = (
+            torch.arange(H * W, device=self.device, dtype=dtype).reshape(H, W).flip(1)
+        )
+
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        test_cases.append(
+            {
+                "input": input_tensor.flatten(),
+                "output": output_tensor,
+                "N": N,
+                "C": C,
+                "H": H,
+                "W": W,
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+            }
+        )
+
+        # Test case 9: Extreme values and edge cases
+        N, C, H, W = 1, 1, 5, 5
+        kernel_size, stride, padding = 2, 1, 0
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        # Create input with extreme values
+        input_tensor = torch.tensor(
+            [
+                [
+                    [
+                        [1e6, -1e6, 0.0, 1e-6, -1e-6],
+                        [float("inf"), float("-inf"), 1.0, 2.0, 3.0],
+                        [4.0, 5.0, 6.0, 7.0, 8.0],
+                        [9.0, 10.0, 11.0, 12.0, 13.0],
+                        [14.0, 15.0, 16.0, 17.0, 18.0],
+                    ]
+                ]
+            ],
+            device=self.device,
+            dtype=dtype,
+        )
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        test_cases.append(
+            {
+                "input": input_tensor.flatten(),
+                "output": output_tensor,
+                "N": N,
+                "C": C,
+                "H": H,
+                "W": W,
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+            }
+        )
+
+        # Test case 10: Non-power-of-two dimensions
+        N, C, H, W = 1, 1, 7, 11
+        kernel_size, stride, padding = 3, 2, 1
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        input_tensor = torch.randn(N, C, H, W, device=self.device, dtype=dtype)
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        test_cases.append(
+            {
+                "input": input_tensor.flatten(),
+                "output": output_tensor,
+                "N": N,
+                "C": C,
+                "H": H,
+                "W": W,
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+            }
+        )
+
+        return test_cases
+
+    def generate_performance_test(self) -> Dict[str, Any]:
+        """Large test case for performance evaluation"""
+        dtype = torch.float32
+        # Reasonable size for performance testing without memory issues
+        N, C, H, W = 4, 64, 256, 256  # 4 batches, 64 channels, 256x256 spatial
+        kernel_size, stride, padding = 3, 2, 1
+
+        H_out = (H + 2 * padding - kernel_size) // stride + 1
+        W_out = (W + 2 * padding - kernel_size) // stride + 1
+
+        # Use seeded random for reproducible performance tests
+        torch.manual_seed(123)
+        input_tensor = torch.randn(N, C, H, W, device=self.device, dtype=dtype)
+        output_tensor = torch.empty(N * C * H_out * W_out, device=self.device, dtype=dtype)
+
+        return {
+            "input": input_tensor.flatten(),
+            "output": output_tensor,
+            "N": N,
+            "C": C,
+            "H": H,
+            "W": W,
+            "kernel_size": kernel_size,
+            "stride": stride,
+            "padding": padding,
+        }
+
+
+# TODO: Implement your TileLang kernel(s) here, e.g.
+#
+# @tilelang.jit
+# def tl_2d_max_pooling(...):
+#     ...
+
+
+def solve(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    N: int,
+    C: int,
+    H: int,
+    W: int,
+    kernel_size: int,
+    stride: int,
+    padding: int,
+):
+    # TODO: launch your TileLang kernel and write the result into `output` in place.
+    pass
+
+
+if __name__ == "__main__":
+    run_challenge(Challenge(), solve)

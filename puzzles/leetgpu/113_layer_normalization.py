@@ -1,0 +1,337 @@
+r"""
+LeetGPU 113: Layer Normalization
+================================
+
+Category: ["leetgpu"]
+Difficulty: ["medium"]
+
+Implement the forward pass of layer normalization for a 2D input tensor. Given an input tensor of shape [N, C] where N is the batch size and C is the number of features, normalize each sample independently across its C features, then apply learnable scale (`weight`) and shift (`bias`) parameters. Layer normalization is a core building block of transformer architectures.
+
+For each sample \(i\), layer normalization computes:
+\[
+\begin{align}
+\mu_i &= \frac{1}{C} \sum_{j=0}^{C-1} x_{i,j} \\
+\sigma_i^2 &= \frac{1}{C} \sum_{j=0}^{C-1} (x_{i,j} - \mu_i)^2 \\
+y_{i,j} &= \text{weight}_j \cdot \frac{x_{i,j} - \mu_i}{\sqrt{\sigma_i^2 + \varepsilon}} + \text{bias}_j
+\end{align}
+\]
+
+(diagram omitted, see challenge.html in leetgpu-challenges)
+
+Implementation Requirements
+---------------------------
+
+- Use only native features (external libraries are not permitted)
+- The `solve` function signature must remain unchanged
+- The final result must be stored in the `output` tensor
+
+Example
+-------
+
+Input:
+
+\(\text{input}\) (N=2, C=4):
+\[
+\begin{bmatrix}
+1.0 & 2.0 & 3.0 & 4.0 \\
+-1.0 & 0.0 & 0.0 & 1.0
+\end{bmatrix}
+\]
+\(\text{weight}\):
+\[
+\begin{bmatrix}
+1.0 & 1.0 & 1.0 & 1.0
+\end{bmatrix}
+\]
+\(\text{bias}\):
+\[
+\begin{bmatrix}
+0.0 & 0.0 & 0.0 & 0.0
+\end{bmatrix}
+\]
+\(\varepsilon\) = 1e-5
+
+Output:
+
+\(\text{output}\) (N=2, C=4):
+\[
+\begin{bmatrix}
+-1.3416 & -0.4472 & 0.4472 & 1.3416 \\
+-1.4142 & 0.0 & 0.0 & 1.4142
+\end{bmatrix}
+\]
+
+Constraints
+-----------
+
+- 1 ≤ `N` ≤ 65,536
+- 1 ≤ `C` ≤ 4,096
+- `eps` = 1e-5
+- Input values are in the range [-100.0, 100.0]
+- Weight values are in the range [0.1, 10.0]
+- Bias values are in the range [-10.0, 10.0]
+- Performance is measured with `N` = 65,536, `C` = 512
+
+Run `python3 puzzles/leetgpu/113_layer_normalization.py` to test your `solve`, or add `--ref` to run the
+reference implementation through the same harness.
+"""
+
+import ctypes
+from typing import Any, Dict, List
+
+import tilelang  # noqa: F401
+import tilelang.language as T  # noqa: F401
+import torch
+from common.leetgpu import ChallengeBase, run_challenge
+
+
+class Challenge(ChallengeBase):
+    name = "Layer Normalization"
+    atol = 1e-04
+    rtol = 1e-04
+    num_gpus = 1
+    access_tier = "free"
+
+    def reference_impl(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        output: torch.Tensor,
+        N: int,
+        C: int,
+        eps: float,
+    ):
+        assert input.shape == output.shape == (N, C)
+        assert weight.shape == bias.shape == (C,)
+        assert input.dtype == weight.dtype == bias.dtype == output.dtype
+
+        mean = input.mean(dim=1, keepdim=True)
+        var = input.var(dim=1, keepdim=True, unbiased=False)
+        normalized = (input - mean) / torch.sqrt(var + eps)
+        output.copy_(weight * normalized + bias)
+
+    def get_solve_signature(self) -> Dict[str, tuple]:
+        return {
+            "input": (ctypes.POINTER(ctypes.c_float), "in"),
+            "weight": (ctypes.POINTER(ctypes.c_float), "in"),
+            "bias": (ctypes.POINTER(ctypes.c_float), "in"),
+            "output": (ctypes.POINTER(ctypes.c_float), "out"),
+            "N": (ctypes.c_int, "in"),
+            "C": (ctypes.c_int, "in"),
+            "eps": (ctypes.c_float, "in"),
+        }
+
+    def generate_example_test(self) -> Dict[str, Any]:
+        dtype = torch.float32
+        N, C = 2, 4
+        input = torch.tensor(
+            [[1.0, 2.0, 3.0, 4.0], [-1.0, 0.0, 0.0, 1.0]], device=self.device, dtype=dtype
+        )
+        weight = torch.ones(C, device=self.device, dtype=dtype)
+        bias = torch.zeros(C, device=self.device, dtype=dtype)
+        output = torch.empty((N, C), device=self.device, dtype=dtype)
+        eps = 1e-5
+        return {
+            "input": input,
+            "weight": weight,
+            "bias": bias,
+            "output": output,
+            "N": N,
+            "C": C,
+            "eps": eps,
+        }
+
+    def generate_functional_test(self) -> List[Dict[str, Any]]:
+        dtype = torch.float32
+        tests = []
+
+        # edge: single element per row
+        N, C = 1, 1
+        tests.append(
+            {
+                "input": torch.tensor([[3.0]], device=self.device, dtype=dtype),
+                "weight": torch.tensor([1.0], device=self.device, dtype=dtype),
+                "bias": torch.tensor([0.5], device=self.device, dtype=dtype),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
+                "N": N,
+                "C": C,
+                "eps": 1e-5,
+            }
+        )
+
+        # edge: 2x2, all zeros
+        N, C = 2, 2
+        tests.append(
+            {
+                "input": torch.zeros((N, C), device=self.device, dtype=dtype),
+                "weight": torch.ones(C, device=self.device, dtype=dtype),
+                "bias": torch.zeros(C, device=self.device, dtype=dtype),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
+                "N": N,
+                "C": C,
+                "eps": 1e-5,
+            }
+        )
+
+        # edge: 4x4, negative values
+        N, C = 4, 4
+        tests.append(
+            {
+                "input": torch.tensor(
+                    [
+                        [-1.0, -2.0, -3.0, -4.0],
+                        [1.0, 2.0, 3.0, 4.0],
+                        [0.0, 0.0, 0.0, 0.0],
+                        [-2.0, 0.0, 2.0, 4.0],
+                    ],
+                    device=self.device,
+                    dtype=dtype,
+                ),
+                "weight": torch.tensor([1.0, 2.0, 1.0, 0.5], device=self.device, dtype=dtype),
+                "bias": torch.tensor([0.0, 0.0, 1.0, -1.0], device=self.device, dtype=dtype),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
+                "N": N,
+                "C": C,
+                "eps": 1e-5,
+            }
+        )
+
+        # power-of-2: 8x16
+        N, C = 8, 16
+        tests.append(
+            {
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-5.0, 5.0),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
+                "N": N,
+                "C": C,
+                "eps": 1e-5,
+            }
+        )
+
+        # power-of-2: 4x4096 (max C)
+        N, C = 4, 4096
+        tests.append(
+            {
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-10.0, 10.0),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-2.0, 2.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
+                "N": N,
+                "C": C,
+                "eps": 1e-5,
+            }
+        )
+
+        # power-of-2: 128x256
+        N, C = 128, 256
+        tests.append(
+            {
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-10.0, 10.0),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-2.0, 2.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
+                "N": N,
+                "C": C,
+                "eps": 1e-5,
+            }
+        )
+
+        # non-power-of-2: 7x30
+        N, C = 7, 30
+        tests.append(
+            {
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-5.0, 5.0),
+                "weight": torch.ones(C, device=self.device, dtype=dtype),
+                "bias": torch.zeros(C, device=self.device, dtype=dtype),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
+                "N": N,
+                "C": C,
+                "eps": 1e-5,
+            }
+        )
+
+        # non-power-of-2: 15x100
+        N, C = 15, 100
+        tests.append(
+            {
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(
+                    -100.0, 100.0
+                ),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.1, 3.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-5.0, 5.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
+                "N": N,
+                "C": C,
+                "eps": 1e-5,
+            }
+        )
+
+        # non-power-of-2: 25x255
+        N, C = 25, 255
+        tests.append(
+            {
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-10.0, 10.0),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
+                "N": N,
+                "C": C,
+                "eps": 1e-5,
+            }
+        )
+
+        # realistic: 512x768 (BERT hidden size)
+        N, C = 512, 768
+        tests.append(
+            {
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-5.0, 5.0),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
+                "N": N,
+                "C": C,
+                "eps": 1e-5,
+            }
+        )
+
+        return tests
+
+    def generate_performance_test(self) -> Dict[str, Any]:
+        dtype = torch.float32
+        N, C = 65536, 512
+        return {
+            "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-5.0, 10.0),
+            "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+            "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+            "output": torch.empty((N, C), device=self.device, dtype=dtype),
+            "N": N,
+            "C": C,
+            "eps": 1e-5,
+        }
+
+
+# TODO: Implement your TileLang kernel(s) here, e.g.
+#
+# @tilelang.jit
+# def tl_layer_normalization(...):
+#     ...
+
+
+def solve(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    output: torch.Tensor,
+    N: int,
+    C: int,
+    eps: float,
+):
+    # TODO: launch your TileLang kernel and write the result into `output` in place.
+    pass
+
+
+if __name__ == "__main__":
+    run_challenge(Challenge(), solve)

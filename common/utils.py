@@ -106,6 +106,23 @@ def test_puzzle(
         print("Mean diff:", torch.mean(torch.abs(output_torch - output_tl)))
 
 
+def time_cuda(fn: Callable, warmups: int = 10, repeats: int = 100) -> float:
+    """Average wall time of `fn()` in milliseconds, measured with CUDA events."""
+
+    for _ in range(warmups):
+        fn()
+
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    torch.cuda.synchronize()
+    start.record()
+    for _ in range(repeats):
+        fn()
+    end.record()
+    torch.cuda.synchronize()
+    return start.elapsed_time(end) / repeats
+
+
 def bench_puzzle(
     puzzle_tl,
     puzzle_torch,
@@ -115,41 +132,13 @@ def bench_puzzle(
 ):
     """Benchmark a puzzle solution with given hyper parameters."""
 
-    warmups = 10
-    repeats = 100
-
     tl_kernel: JITKernel = puzzle_tl.compile(**tl_hyper_params)
 
     inputs_in_torch_tensors = _torch_tensor_materialize(tl_kernel.params)
 
-    # As the kernel may modify the input tensors, we make a copy of them.
-    # inputs_copy = [i.clone() for i in inputs_in_torch_tensors]
-
     if bench_torch:
-        for _ in range(warmups):
-            puzzle_torch(*inputs_in_torch_tensors)
-
-        torch_start = torch.cuda.Event(enable_timing=True)
-        torch_end = torch.cuda.Event(enable_timing=True)
-        torch.cuda.synchronize()
-        torch_start.record()
-        for _ in range(repeats):
-            puzzle_torch(*inputs_in_torch_tensors)
-        torch_end.record()
-        torch.cuda.synchronize()
-        torch_time = torch_start.elapsed_time(torch_end) / repeats
+        torch_time = time_cuda(lambda: puzzle_torch(*inputs_in_torch_tensors))
         print(f"Torch time: {torch_time:.3f} ms")
 
-    for _ in range(warmups):
-        tl_kernel(*inputs_in_torch_tensors)
-
-    tl_start = torch.cuda.Event(enable_timing=True)
-    tl_end = torch.cuda.Event(enable_timing=True)
-    torch.cuda.synchronize()
-    tl_start.record()
-    for _ in range(repeats):
-        tl_kernel(*inputs_in_torch_tensors)
-    tl_end.record()
-    torch.cuda.synchronize()
-    tl_time = tl_start.elapsed_time(tl_end) / repeats
+    tl_time = time_cuda(lambda: tl_kernel(*inputs_in_torch_tensors))
     print(f"{bench_name} time: {tl_time:.3f} ms")

@@ -1,0 +1,367 @@
+r"""
+LeetGPU 18: Sparse Matrix-Vector Multiplication
+===============================================
+
+Category: ["leetgpu"]
+Difficulty: ["medium"]
+
+Implement a GPU program that performs sparse matrix-vector multiplication.
+Given a sparse matrix \(A\) of dimensions \(M \times N\) and a dense vector \(x\) of length \(N\),
+compute the product vector \(y = A \times x\), which will have length \(M\). `A` is stored in row-major order.
+`nnz` is the number of non-zero elements in `A`.
+
+Mathematically, the operation is defined as:
+\[
+y_i = \sum_{j=0}^{N-1} A_{ij} \cdot x_j \quad \text{for} \quad i = 0, 1, \ldots, M-1
+\]
+
+The matrix \(A\) is approximately 60 - 70% sparse.
+
+Implementation Requirements
+---------------------------
+
+- Use only GPU native features (external libraries are not permitted)
+- The `solve` function signature must remain unchanged
+- The final result must be stored in vector `y`
+
+Example:
+--------
+
+Input:
+
+Matrix \(A\) (\(3 \times 4\)):
+\[
+\begin{bmatrix}
+5.0 & 0.0 & 0.0 & 1.0 \\
+0.0 & 2.0 & 3.0 & 0.0 \\
+0.0 & 0.0 & 0.0 & 4.0
+\end{bmatrix}
+\]
+Vector \(x\):
+\[
+\begin{bmatrix}
+1.0 \\
+2.0 \\
+3.0 \\
+4.0
+\end{bmatrix}
+\]
+Output:
+
+Vector \(y\):
+\[
+\begin{bmatrix}
+9.0 \\
+13.0 \\
+16.0
+\end{bmatrix}
+\]
+
+Constraints
+-----------
+
+- 1 ≤ `M`, `N` ≤ 10,000
+- The matrix \(A\) is approximately 60-70% sparse (i.e., 60-70% of elements are zero)
+- Performance is measured with `M` = 1,000, `N` = 10,000
+
+Run `python3 puzzles/leetgpu/18_sparse_matrix_vector_multiplication.py` to test your `solve`, or add `--ref` to run the
+reference implementation through the same harness.
+"""
+
+import ctypes
+from typing import Any, Dict, List
+
+import tilelang  # noqa: F401
+import tilelang.language as T  # noqa: F401
+import torch
+from common.leetgpu import ChallengeBase, run_challenge
+
+
+class Challenge(ChallengeBase):
+    name = "Sparse Matrix-Vector Multiplication"
+    atol = 0.001
+    rtol = 0.001
+    num_gpus = 1
+    access_tier = "free"
+
+    def reference_impl(
+        self, A: torch.Tensor, x: torch.Tensor, y: torch.Tensor, M: int, N: int, nnz: int
+    ):
+        # Accept A as either flattened (M*N,) or 2D (M, N)
+        if A.shape == (M * N,):
+            A_matrix = A.view(M, N)
+        elif A.shape == (M, N):
+            A_matrix = A
+        else:
+            raise AssertionError(f"A.shape {A.shape} does not match expected {(M*N,)} or {(M, N)}")
+        assert x.shape == (N,)
+        assert y.shape == (M,)
+        result = torch.matmul(A_matrix, x)
+        y.copy_(result)
+
+    def get_solve_signature(self) -> Dict[str, tuple]:
+        return {
+            "A": (ctypes.POINTER(ctypes.c_float), "in"),
+            "x": (ctypes.POINTER(ctypes.c_float), "in"),
+            "y": (ctypes.POINTER(ctypes.c_float), "out"),
+            "M": (ctypes.c_int, "in"),
+            "N": (ctypes.c_int, "in"),
+            "nnz": (ctypes.c_int, "in"),
+        }
+
+    def generate_example_test(self) -> Dict[str, Any]:
+        dtype = torch.float32
+        A = torch.tensor(
+            [5.0, 0.0, 0.0, 1.0, 0.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.0, 4.0],
+            device=self.device,
+            dtype=dtype,
+        )
+        x = torch.tensor([1.0, 2.0, 3.0, 4.0], device=self.device, dtype=dtype)
+        y = torch.empty(3, device=self.device, dtype=dtype)
+        return {
+            "A": A,
+            "x": x,
+            "y": y,
+            "M": 3,
+            "N": 4,
+            "nnz": 5,
+        }
+
+    def generate_functional_test(self) -> List[Dict[str, Any]]:
+        dtype = torch.float32
+        tests = []
+        # small_test
+        tests.append(
+            {
+                "A": torch.tensor([[1.0, 2.0], [3.0, 4.0]], device=self.device, dtype=dtype),
+                "x": torch.tensor([1.0, 1.0], device=self.device, dtype=dtype),
+                "y": torch.empty(2, device=self.device, dtype=dtype),
+                "M": 2,
+                "N": 2,
+                "nnz": 4,
+            }
+        )
+        # identity_test
+        tests.append(
+            {
+                "A": torch.tensor(
+                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    device=self.device,
+                    dtype=dtype,
+                ),
+                "x": torch.tensor([1.0, 2.0, 3.0], device=self.device, dtype=dtype),
+                "y": torch.empty(3, device=self.device, dtype=dtype),
+                "M": 3,
+                "N": 3,
+                "nnz": 3,
+            }
+        )
+        # zero_test
+        tests.append(
+            {
+                "A": torch.zeros((2, 3), device=self.device, dtype=dtype),
+                "x": torch.tensor([1.0, 2.0, 3.0], device=self.device, dtype=dtype),
+                "y": torch.empty(2, device=self.device, dtype=dtype),
+                "M": 2,
+                "N": 3,
+                "nnz": 0,
+            }
+        )
+        # single_element_per_row
+        tests.append(
+            {
+                "A": torch.tensor(
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0], [0.0, 0.0, 3.0, 0.0]],
+                    device=self.device,
+                    dtype=dtype,
+                ),
+                "x": torch.tensor([1.0, 2.0, 3.0, 4.0], device=self.device, dtype=dtype),
+                "y": torch.empty(3, device=self.device, dtype=dtype),
+                "M": 3,
+                "N": 4,
+                "nnz": 3,
+            }
+        )
+        # negative_values
+        tests.append(
+            {
+                "A": torch.tensor(
+                    [[-1.0, -2.0, -3.0], [-4.0, -5.0, -6.0]], device=self.device, dtype=dtype
+                ),
+                "x": torch.tensor([-1.0, -2.0, -3.0], device=self.device, dtype=dtype),
+                "y": torch.empty(2, device=self.device, dtype=dtype),
+                "M": 2,
+                "N": 3,
+                "nnz": 6,
+            }
+        )
+        # medium_matrix
+        tests.append(
+            {
+                "A": torch.tensor(
+                    [
+                        1.0,
+                        0.0,
+                        2.0,
+                        0.0,
+                        0.0,
+                        3.0,
+                        0.0,
+                        4.0,
+                        0.0,
+                        5.0,
+                        0.0,
+                        6.0,
+                        0.0,
+                        0.0,
+                        7.0,
+                        0.0,
+                        8.0,
+                        0.0,
+                        9.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                        2.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        3.0,
+                        0.0,
+                        0.0,
+                        4.0,
+                        5.0,
+                        0.0,
+                        0.0,
+                        6.0,
+                        0.0,
+                        0.0,
+                        7.0,
+                        0.0,
+                        8.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        9.0,
+                        0.0,
+                        1.0,
+                        0.0,
+                        2.0,
+                        0.0,
+                        3.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        4.0,
+                        5.0,
+                        6.0,
+                        0.0,
+                        7.0,
+                        8.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        9.0,
+                        0.0,
+                        1.0,
+                        0.0,
+                        2.0,
+                        3.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        4.0,
+                    ],
+                    device=self.device,
+                    dtype=dtype,
+                ),
+                "x": torch.tensor(
+                    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], device=self.device, dtype=dtype
+                ),
+                "y": torch.empty(10, device=self.device, dtype=dtype),
+                "M": 10,
+                "N": 8,
+                "nnz": 35,
+            }
+        )
+
+        # random_sparse_matrix
+        M_sparse = 20
+        N_sparse = 20
+        sparsity = 0.65
+
+        # Generate random sparse matrix
+        A_dense = torch.empty((M_sparse, N_sparse), device=self.device, dtype=dtype).uniform_(
+            -5.0, 5.0
+        )
+        mask = torch.rand((M_sparse, N_sparse), device=self.device) > sparsity
+        A_sparse = A_dense * mask
+        nnz_sparse = int(mask.sum().item())
+
+        tests.append(
+            {
+                "A": A_sparse,
+                "x": torch.empty(N_sparse, device=self.device, dtype=dtype).uniform_(-2.0, 2.0),
+                "y": torch.zeros(M_sparse, device=self.device, dtype=dtype),
+                "M": M_sparse,
+                "N": N_sparse,
+                "nnz": nnz_sparse,
+            }
+        )
+
+        return tests
+
+    def generate_performance_test(self) -> Dict[str, Any]:
+        dtype = torch.float32
+        M = 1000
+        N = 10000
+        nnz = 3500000
+        A = torch.zeros((M, N), device=self.device, dtype=dtype)
+        total_elements = M * N
+        flat_indices = torch.randperm(total_elements, device=self.device)[:nnz]
+        values = torch.empty(nnz, device=self.device, dtype=dtype).uniform_(-10.0, 10.0)
+        A.view(-1)[flat_indices] = values
+
+        # Create a mask: 35% entries will be kept, 65% set to zero
+        x = torch.empty(N, device=self.device, dtype=dtype).uniform_(-5.0, 5.0)
+        y = torch.empty(M, device=self.device, dtype=dtype)
+        return {
+            "A": A,
+            "x": x,
+            "y": y,
+            "M": M,
+            "N": N,
+            "nnz": nnz,
+        }
+
+
+# TODO: Implement your TileLang kernel(s) here, e.g.
+#
+# @tilelang.jit
+# def tl_sparse_matrix_vector_multiplication(...):
+#     ...
+
+
+def solve(
+    A: torch.Tensor,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    M: int,
+    N: int,
+    nnz: int,
+):
+    # TODO: launch your TileLang kernel and write the result into `y` in place.
+    pass
+
+
+if __name__ == "__main__":
+    run_challenge(Challenge(), solve)
