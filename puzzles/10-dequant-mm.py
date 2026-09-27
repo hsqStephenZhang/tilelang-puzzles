@@ -8,6 +8,7 @@ Category: ["official"]
 Difficulty: ["hard"]
 """
 
+from common.utils import bench_puzzle
 import tilelang
 import tilelang.language as T
 import torch
@@ -82,6 +83,29 @@ def tl_dequant_matmul(A, B, BLOCK_M: int, BLOCK_N: int, BLOCK_K: int):
 
     # TODO: Implement this function
 
+    with T.Kernel(T.ceildiv(M, BLOCK_M), T.ceildiv(N, BLOCK_N), threads=256) as (bx, by):
+        A_shared = T.alloc_shared((BLOCK_M, BLOCK_K), A_dtype)
+        B_packed = T.alloc_shared((BLOCK_K, BLOCK_N // 2), B_storage_dtype)
+        B_dequant = T.alloc_shared((BLOCK_K, BLOCK_N), A_dtype)
+        C_acc = T.alloc_fragment((BLOCK_M, BLOCK_N), accum_dtype)
+        T.clear(C_acc)
+
+        row = bx * BLOCK_M
+        col = by * BLOCK_N
+        for k in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=3):
+            T.copy(A[row : row + BLOCK_M, k * BLOCK_K : (k + 1) * BLOCK_K], A_shared)
+            T.copy(B[k * BLOCK_K : (k + 1) * BLOCK_K, col // 2 : (col + BLOCK_N) // 2], B_packed)
+
+            # unpack
+            # TODO: perf with bank conflict, this might have caused performance regression
+            for kk, j in T.Parallel(BLOCK_K, BLOCK_N // 2):
+                B_dequant[kk, 2 * j] = T.cast((B_packed[kk, j] & 0x0F) - 8.0, T.float16)
+                B_dequant[kk, 2 * j + 1] = T.cast(((B_packed[kk, j] >> 4) & 0x0F) - 8.0, T.float16)
+
+            T.gemm(A_shared, B_dequant, C_acc)
+
+        T.copy(C_acc, C[row : row + BLOCK_M, col : col + BLOCK_N])
+
     return C
 
 
@@ -95,21 +119,25 @@ def run_dequant_matmul():
     BLOCK_N = 128
     BLOCK_K = 64
 
+    params = {
+        "M": M,
+        "N": N,
+        "K": K,
+        "BLOCK_M": BLOCK_M,
+        "BLOCK_N": BLOCK_N,
+        "BLOCK_K": BLOCK_K,
+    }
+
     # A_dtype = torch.float16
     # B_storage_dtype = torch.uint8
     # accum_dtype = torch.float32
     test_puzzle(
         tl_dequant_matmul,
         ref_dequant_matmul,
-        {
-            "M": M,
-            "N": N,
-            "K": K,
-            "BLOCK_M": BLOCK_M,
-            "BLOCK_N": BLOCK_N,
-            "BLOCK_K": BLOCK_K,
-        },
+        params,
     )
+
+    bench_puzzle(tl_dequant_matmul, ref_dequant_matmul, params, bench_torch=True)
 
 
 if __name__ == "__main__":
