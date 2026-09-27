@@ -63,7 +63,7 @@ def tl_gemv(A, B, BLOCK_M: int, BLOCK_K: int):
     C = T.empty((M,), dtype)
 
     # TODO: Implement this function
-    
+
     return C
 
 
@@ -219,6 +219,20 @@ def tl_matmul_opt(A, B, BLOCK_M: int, BLOCK_N: int, BLOCK_K: int):
 
     # TODO: Implement this function
 
+    with T.Kernel(T.ceildiv(M, BLOCK_M), T.ceildiv(N, BLOCK_N), threads=256) as (bx, by):
+        A_shared = T.alloc_shared((BLOCK_M, BLOCK_K), dtype)
+        B_shared = T.alloc_shared((BLOCK_K, BLOCK_N), dtype)
+        C_acc = T.alloc_fragment((BLOCK_M, BLOCK_N), accum_dtype)
+        T.clear(C_acc)
+
+        row = bx * BLOCK_N
+        col = by * BLOCK_M
+        for k in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=3):
+            T.copy(A[row : row + BLOCK_M, k * BLOCK_K : (k + 1) * BLOCK_K], A_shared)
+            T.copy(B[k * BLOCK_K : (k + 1) * BLOCK_K, col : col + BLOCK_N], B_shared)
+            T.gemm(A_shared, B_shared, C_acc)
+        T.copy(C_acc, C[row : row + BLOCK_M, col : col + BLOCK_N])
+
     return C
 
 
@@ -240,19 +254,20 @@ def run_matmul_opt():
         "BLOCK_K": BLOCK_K,
     }
 
-    print("Naive Matmul Implementation: ")
-    naive_matmul_kernel = tl_matmul_naive.compile(**args_dict)
-    naive_matmul_kernel.print_source_code()
+    # print("Naive Matmul Implementation: ")
+    # naive_matmul_kernel = tl_matmul_naive.compile(**args_dict)
+    # naive_matmul_kernel.print_source_code()
 
     print("OPT Matmul Implementation: ")
     opt_matmul_kernel = tl_matmul_opt.compile(**args_dict)
     opt_matmul_kernel.print_source_code()
 
-    bench_puzzle(tl_matmul_naive, ref_matmul, args_dict, bench_torch=True)
+    # bench_puzzle(tl_matmul_naive, ref_matmul, args_dict, bench_torch=True)
+    test_puzzle(tl_matmul_opt, ref_matmul, args_dict)
     bench_puzzle(tl_matmul_opt, ref_matmul, args_dict, bench_torch=True)
 
 
 if __name__ == "__main__":
-    run_gemv()
-    run_matmul_naive()
+    # run_gemv()
+    # run_matmul_naive()
     run_matmul_opt()
